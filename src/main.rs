@@ -1,16 +1,14 @@
 use clap::Parser;
-
 use std::env;
 
+use bigdecimal::FromPrimitive;
 use borsh::BorshSerialize;
 use futures::StreamExt;
-use redis::aio::Connection;
-use redis::AsyncCommands;
+use scylla::{Session, SessionBuilder};
 
 use tracing_subscriber::EnvFilter;
 
 use crate::configs::Opts;
-use near_indexer_primitives::types::AccountId;
 use near_indexer_primitives::views::StateChangeValueView;
 use near_indexer_primitives::CryptoHash;
 use near_primitives_core::account::Account;
@@ -18,172 +16,222 @@ use near_primitives_core::account::Account;
 mod configs;
 
 // Categories for logging
-const INDEXER_FOR_EXPLORER: &str = "indexer_for_explorer";
+const INDEXER: &str = "state_indexer";
 
-async fn get_redis_connection() -> anyhow::Result<Connection> {
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
-    let redis_client = redis::Client::open(redis_url)?;
-    Ok(redis_client.get_async_connection().await?)
+// Database schema
+// Main table to keep all the state changes happening in NEAR Protocol
+// CREATE TABLE state_changes (
+//     account_id varchar,
+//     block_height varint,
+//     block_hash varchar,
+//     change_scope varchar,
+//     data_key BLOB,
+//     data_value BLOB,
+//     PRIMARY KEY ((account_id, change_scope), block_height) -- prim key like this because we mostly are going to query by these 3 fields
+// );
+//
+// TODO: implement it
+// Map-table to store relation between block_hash-block_height and included chunk hashes
+// CREATE TABLE blocks (
+//     block_hash varchar,
+//     bloch_height varchar PRIMARY KEY,
+//     chunks set<varchar>
+// );
+//
+async fn get_scylladb_session() -> anyhow::Result<Session> {
+    tracing::debug!(target: INDEXER, "Connecting to ScyllaDB",);
+    let scylla_url = env::var("SCYLLA_URL").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+    let scylla_keyspace = env::var("SCYLLA_KEYSPACE").unwrap_or_else(|_| "state_indexer".to_string());
+    let session: Session = SessionBuilder::new()
+        .known_node(scylla_url)
+        .use_keyspace(scylla_keyspace, false)
+        .build()
+        .await?;
+    Ok(session)
 }
 
-async fn handle_update(
-    redis_connection: &mut redis::aio::Connection, block_hash: CryptoHash, block_height: u64, scope: &[u8],
-    account_id: &AccountId, data_key: Option<&[u8]>, data_value: Option<&[u8]>,
+async fn handle_streamer_message(
+    streamer_message: near_indexer_primitives::StreamerMessage,
+    scylladb_session: &Session,
 ) -> anyhow::Result<()> {
-    let redis_key = if let Some(data_key) = data_key {
-        [account_id.as_ref().as_bytes(), b":", data_key].concat()
-    } else {
-        account_id.as_ref().as_bytes().to_vec()
-    };
+    let block_height = streamer_message.block.header.height;
+    let block_hash = streamer_message.block.header.hash;
+    tracing::info!(target: INDEXER, "Block height {}", block_height,);
 
-    redis_connection
-        .zadd([b"h:", scope, b":", redis_key.as_slice()].concat(), block_hash.as_ref(), block_height)
-        .await?;
+    let futures = streamer_message.shards.into_iter().flat_map(|shard| {
+        shard.state_changes.into_iter().map(|state_change_with_cause| {
+            handle_state_change(state_change_with_cause, scylladb_session, block_height, block_hash)
+        })
+    });
 
-    if let Some(data_value) = data_value {
-        redis_connection
-            .set([b"d", scope, b":", redis_key.as_slice(), b":", block_hash.as_ref()].concat(), data_value)
-            .await?;
-    }
-
-    if let Some(data_key) = data_key {
-        // NOTE: using hset in indexer to overwrite latest data
-        redis_connection
-            .hset(
-                [b"k:", scope, b":", account_id.as_ref().as_bytes()].concat(),
-                data_key,
-                block_height,
-            )
-            .await?;
-    }
-
+    futures::future::join_all(futures).await;
     Ok(())
 }
 
-async fn handle_message(streamer_message: near_indexer_primitives::StreamerMessage) -> anyhow::Result<()> {
-    let mut redis_connection = get_redis_connection().await?;
-
-    let block_height = streamer_message.block.header.height;
-    let block_timestamp = streamer_message.block.header.timestamp;
-    let block_hash = streamer_message.block.header.hash;
-
-    for shard in streamer_message.shards {
-        for state_change in shard.state_changes {
-            match state_change.value {
-                StateChangeValueView::DataUpdate { account_id, key, value } => {
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"d",
-                        &account_id,
-                        Some(key.as_ref()),
-                        Some(value.as_ref()),
-                    )
-                    .await?;
-                    println!("DataUpdate {}", account_id);
-                }
-                StateChangeValueView::DataDeletion { account_id, key } => {
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"d",
-                        &account_id,
-                        Some(key.as_ref()),
-                        None,
-                    )
-                    .await?;
-                    println!("DataDeletion {}", account_id);
-                }
-                StateChangeValueView::AccessKeyUpdate {
-                    account_id,
-                    public_key,
-                    access_key,
-                } => {
-                    let data_key = public_key.try_to_vec().unwrap();
-                    let value = access_key.try_to_vec().unwrap();
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"k",
-                        &account_id,
-                        Some(&data_key),
-                        Some(&value),
-                    )
-                    .await?;
-                    println!("AccessKeyUpdate {}", account_id);
-                }
-                StateChangeValueView::AccessKeyDeletion { account_id, public_key } => {
-                    let data_key = public_key.try_to_vec().unwrap();
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"k",
-                        &account_id,
-                        Some(&data_key),
-                        None,
-                    )
-                    .await?;
-                    println!("AccessKeyDeletion {}", account_id);
-                }
-                StateChangeValueView::ContractCodeUpdate { account_id, code } => {
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"c",
-                        &account_id,
-                        None,
-                        Some(code.as_ref()),
-                    )
-                    .await?;
-                    println!("ContractCodeUpdate {}", account_id);
-                }
-                StateChangeValueView::ContractCodeDeletion { account_id } => {
-                    handle_update(&mut redis_connection, block_hash, block_height, b"c", &account_id, None, None)
-                        .await?;
-                    println!("ContractCodeDeletion {}", account_id);
-                }
-                StateChangeValueView::AccountUpdate { account_id, account } => {
-                    let value = Account::from(account).try_to_vec().unwrap();
-                    handle_update(
-                        &mut redis_connection,
-                        block_hash,
-                        block_height,
-                        b"a",
-                        &account_id,
-                        None,
-                        Some(value.as_ref()),
-                    )
-                    .await?;
-                    println!("AccountUpdate {}", account_id);
-                }
-                StateChangeValueView::AccountDeletion { account_id } => {
-                    handle_update(&mut redis_connection, block_hash, block_height, b"a", &account_id, None, None)
-                        .await?;
-                    println!("AccountDeletion {}", account_id);
-                    let redis_key = account_id.as_ref().as_bytes();
-                    redis_connection
-                        .zadd([b"h:a:", redis_key].concat(), block_hash.as_ref(), block_height)
-                        .await?;
-                }
-            }
+async fn handle_state_change(
+    state_change: near_indexer_primitives::views::StateChangeWithCauseView,
+    scylladb_session: &Session,
+    block_height: u64,
+    block_hash: CryptoHash,
+) -> anyhow::Result<()> {
+    match state_change.value {
+        StateChangeValueView::DataUpdate { account_id, key, value } => {
+            let key: &[u8] = key.as_ref();
+            let value: &[u8] = value.as_ref();
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Data".to_string(),
+                        Some(key.to_vec()),
+                        Some(value.to_vec()),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "DataUpdate {}", account_id,);
+        }
+        StateChangeValueView::DataDeletion { account_id, key } => {
+            let key: &[u8] = key.as_ref();
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?, NULL)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Data".to_string(),
+                        Some(key.to_vec()),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "DataUpdate {}", account_id,);
+        }
+        StateChangeValueView::AccessKeyUpdate {
+            account_id,
+            public_key,
+            access_key,
+        } => {
+            let data_key = public_key
+                .try_to_vec()
+                .expect("Failed to borsh-serialize the PublicKey");
+            let data_value = access_key
+                .try_to_vec()
+                .expect("Failed to borsh-serialize the AccessKey");
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?, ?)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "AccessKey".to_string(),
+                        Some(data_key),
+                        Some(data_value),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "AccessKeyUpdate {}", account_id,);
+        }
+        StateChangeValueView::AccessKeyDeletion { account_id, public_key } => {
+            let data_key = public_key
+                .try_to_vec()
+                .expect("Failed to borsh-serialize the PublicKey");
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?, NULL)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "AccessKey".to_string(),
+                        Some(data_key),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "AccessKeyUpdate {}", account_id,);
+        }
+        StateChangeValueView::ContractCodeUpdate { account_id, code } => {
+            let code: &[u8] = code.as_ref();
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL, ?)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Contract".to_string(),
+                        Some(code.to_vec()),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "ContractCodeUpdate {}", account_id,);
+        }
+        StateChangeValueView::ContractCodeDeletion { account_id } => {
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL, NULL)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Contract".to_string(),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "ContractCodeUpdate {}", account_id,);
+        }
+        StateChangeValueView::AccountUpdate { account_id, account } => {
+            let value = Account::from(account)
+                .try_to_vec()
+                .expect("Failed to borsh-serialize the Account");
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL, ?)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Account".to_string(),
+                        Some(value),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "AccountUpdate {}", account_id,);
+        }
+        StateChangeValueView::AccountDeletion { account_id } => {
+            scylladb_session
+                .query(
+                    "INSERT INTO state_changes
+                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL, NULL)",
+                    (
+                        account_id.to_string(),
+                        bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
+                        block_hash.to_string(),
+                        "Account".to_string(),
+                    ),
+                )
+                .await?;
+            tracing::debug!(target: INDEXER, "AccountUpdate {}", account_id,);
         }
     }
-
-    redis_connection
-        .set([b"t:", block_height.to_string().as_bytes()].concat(), block_timestamp.to_string())
-        .await?;
-
-    let disable_block_height_update = env::var("DISABLE_BLOCK_INDEX_UPDATE").unwrap_or_else(|_| "false".to_string());
-    if !(disable_block_height_update == "true" || disable_block_height_update == "yes") {
-        println!("latest_block_height {}", block_height);
-        redis_connection.set(b"latest_block_height", block_height).await?;
-    }
-
     Ok(())
 }
 
@@ -193,9 +241,7 @@ async fn main() -> anyhow::Result<()> {
     // (sending telemetry and downloading genesis)
     openssl_probe::init_ssl_cert_env_vars();
 
-    let mut env_filter = EnvFilter::new(
-        "tokio_reactor=info,near=info,near=error,stats=info,telemetry=info,indexer=info,indexer_for_explorer=info,aggregated=info",
-    );
+    let mut env_filter = EnvFilter::new("state_indexer=info");
 
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
         if !rust_log.is_empty() {
@@ -223,8 +269,11 @@ async fn main() -> anyhow::Result<()> {
     let config: near_lake_framework::LakeConfig = opts.to_lake_config().await;
     let (sender, stream) = near_lake_framework::streamer(config);
 
+    // let redis_connection = get_redis_connection().await?;
+    let scylladb_session = get_scylladb_session().await?;
+
     let mut handlers = tokio_stream::wrappers::ReceiverStream::new(stream)
-        .map(handle_message)
+        .map(|streamer_message| handle_streamer_message(streamer_message, &scylladb_session))
         .buffer_unordered(1usize);
 
     while let Some(_handle_message) = handlers.next().await {}

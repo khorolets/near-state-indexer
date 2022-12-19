@@ -1,3 +1,44 @@
+## Create `.env` file in the project root
+
+```
+SCYLLA_URL=127.0.0.1:9042
+SCYLLA_KEYSPACE=state_indexer
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_DEFAULT_REGION=eu-central-1
+```
+
+## Set up local ScyllaDb
+
+```
+$ docker run --name some-scylla -p 9042:9042 --hostname some-scylla -d scylladb/scylla --smp 1
+
+$ docker exec -it some-scylla cqlsh
+
+CREATE  KEYSPACE state_indexer
+   WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+USE KEYSPACE state_indexer;
+
+CREATE TABLE state_changes (
+    account_id varchar,
+    block_height varint,
+    block_hash varchar,
+    change_scope varchar,
+    data_key BLOB,
+    data_value BLOB,
+    PRIMARY KEY ((account_id, change_scope), block_height)
+);
+```
+
+## Build state-indexer and run
+
+```
+$ env RUST_LOG="state_indexer=debug" cargo run --release -- testnet from-latest
+```
+
+**Disregard the below, needs to be rewritten**
+
 # NEAR State Indexer
 
 NEAR State Indexer is built on top of [NEAR Indexer microframework](https://github.com/near/nearcore/tree/master/chain/indexer) to watch the network and store all the state changes in the Redis database.
