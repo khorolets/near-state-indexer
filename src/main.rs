@@ -1,10 +1,9 @@
 use clap::Parser;
-use std::env;
 
 use bigdecimal::FromPrimitive;
 use borsh::BorshSerialize;
 use futures::StreamExt;
-use scylla::{Session, SessionBuilder};
+use scylla::{QueryResult, Session};
 
 use tracing_subscriber::EnvFilter;
 
@@ -18,45 +17,16 @@ mod configs;
 // Categories for logging
 const INDEXER: &str = "state_indexer";
 
-// Database schema
-// Main table to keep all the state changes happening in NEAR Protocol
-// CREATE TABLE state_changes (
-//     account_id varchar,
-//     block_height varint,
-//     block_hash varchar,
-//     change_scope varchar,
-//     data_key BLOB,
-//     data_value BLOB,
-//     PRIMARY KEY ((account_id, change_scope), block_height) -- prim key like this because we mostly are going to query by these 3 fields
-// );
-//
-// TODO: implement it
-// Map-table to store relation between block_hash-block_height and included chunk hashes
-// CREATE TABLE blocks (
-//     block_hash varchar,
-//     bloch_height varchar PRIMARY KEY,
-//     chunks set<varchar>
-// );
-//
-async fn get_scylladb_session() -> anyhow::Result<Session> {
-    tracing::debug!(target: INDEXER, "Connecting to ScyllaDB",);
-    let scylla_url = env::var("SCYLLA_URL").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let scylla_keyspace = env::var("SCYLLA_KEYSPACE").unwrap_or_else(|_| "state_indexer".to_string());
-    let session: Session = SessionBuilder::new()
-        .known_node(scylla_url)
-        .use_keyspace(scylla_keyspace, false)
-        .build()
-        .await?;
-    Ok(session)
-}
-
 async fn handle_streamer_message(
     streamer_message: near_indexer_primitives::StreamerMessage,
     scylladb_session: &Session,
+    indexer_id: &str,
 ) -> anyhow::Result<()> {
     let block_height = streamer_message.block.header.height;
     let block_hash = streamer_message.block.header.hash;
     tracing::info!(target: INDEXER, "Block height {}", block_height,);
+
+    let _ = handle_block(&streamer_message.block, scylladb_session).await;
 
     let futures = streamer_message.shards.into_iter().flat_map(|shard| {
         shard.state_changes.into_iter().map(|state_change_with_cause| {
@@ -65,7 +35,38 @@ async fn handle_streamer_message(
     });
 
     futures::future::join_all(futures).await;
+
+    scylladb_session
+        .query(
+            "INSERT INTO meta
+            (indexer_id, last_processed_block_height)
+            VALUES (?, ?)",
+            (indexer_id, bigdecimal::BigDecimal::from_u64(block_height).unwrap()),
+        )
+        .await?;
     Ok(())
+}
+
+async fn handle_block(
+    block: &near_indexer_primitives::views::BlockView,
+    scylladb_session: &Session,
+) -> anyhow::Result<QueryResult> {
+    Ok(scylladb_session
+        .query(
+            "INSERT INTO blocks
+            (block_height, block_hash, chunks)
+            VALUES (?, ?, ?)",
+            (
+                bigdecimal::BigDecimal::from_u64(block.header.height).unwrap(),
+                block.header.hash.to_string(),
+                block
+                    .chunks
+                    .iter()
+                    .map(|chunk_header_view| chunk_header_view.chunk_hash.to_string())
+                    .collect::<Vec<String>>(),
+            ),
+        )
+        .await?)
 }
 
 async fn handle_state_change(
@@ -266,14 +267,14 @@ async fn main() -> anyhow::Result<()> {
 
     let opts: Opts = Opts::parse();
 
-    let config: near_lake_framework::LakeConfig = opts.to_lake_config().await;
+    let config: near_lake_framework::LakeConfig = opts.to_lake_config().await?;
     let (sender, stream) = near_lake_framework::streamer(config);
 
     // let redis_connection = get_redis_connection().await?;
-    let scylladb_session = get_scylladb_session().await?;
+    let scylladb_session = configs::get_scylladb_session(&opts.scylla_url, &opts.scylla_keyspace).await?;
 
     let mut handlers = tokio_stream::wrappers::ReceiverStream::new(stream)
-        .map(|streamer_message| handle_streamer_message(streamer_message, &scylladb_session))
+        .map(|streamer_message| handle_streamer_message(streamer_message, &scylladb_session, &opts.indexer_id))
         .buffer_unordered(1usize);
 
     while let Some(_handle_message) = handlers.next().await {}

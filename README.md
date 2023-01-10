@@ -1,6 +1,7 @@
 ## Create `.env` file in the project root
 
 ```
+INDEXER_ID=state-indexer-1
 SCYLLA_URL=127.0.0.1:9042
 SCYLLA_KEYSPACE=state_indexer
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
@@ -12,29 +13,14 @@ AWS_DEFAULT_REGION=eu-central-1
 
 ```
 $ docker run --name some-scylla -p 9042:9042 --hostname some-scylla -d scylladb/scylla --smp 1
-
-$ docker exec -it some-scylla cqlsh
-
-CREATE  KEYSPACE state_indexer
-   WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};
-
-USE KEYSPACE state_indexer;
-
-CREATE TABLE state_changes (
-    account_id varchar,
-    block_height varint,
-    block_hash varchar,
-    change_scope varchar,
-    data_key BLOB,
-    data_value BLOB,
-    PRIMARY KEY ((account_id, change_scope), block_height)
-);
 ```
+
+You can find the schema definition in the `src/configs.rs` file. There is a `migrate` function that is being called on every start. It will create necessary tables if they don't exist.
 
 ## Build state-indexer and run
 
 ```
-$ env RUST_LOG="state_indexer=debug" cargo run --release -- testnet from-latest
+$ env RUST_LOG="state_indexer=debug" cargo run --release -- testnet from-interruption
 ```
 
 **Disregard the below, needs to be rewritten**
