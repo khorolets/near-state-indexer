@@ -2203,6 +2203,8 @@ dependencies = [
 [[package]]
 name = "scylla"
 version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b9d4ef7fb24d95d30c4a8da782bb2afead3a8b66f32c805bb82a03722d7be33"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2233,6 +2235,8 @@ dependencies = [
 [[package]]
 name = "scylla-cql"
 version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6972061cbcc83754b4243d007ae51c1a1345a950b368cbdaad0186eac8799203"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -2243,7 +2247,6 @@ dependencies = [
  "num-bigint",
  "num_enum",
  "scylla-macros",
- "secrecy",
  "snap",
  "thiserror",
  "tokio",
@@ -2253,6 +2256,8 @@ dependencies = [
 [[package]]
 name = "scylla-macros"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e03b3a19daa79085439113c746d2946e5e6effd2d9039bf092bb08df915487b2"
 dependencies = [
  "quote",
  "syn",
@@ -2275,15 +2280,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83080e2c2fc1006e625be82e5d1eb6a43b7fd9578b617fcc55814daf286bba4b"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "secrecy"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0673d6a6449f5e7d12a1caf424fd9363e2af3a4953023ed455e3c4beef4597c0"
-dependencies = [
- "zeroize",
 ]
 
 [[package]]
