@@ -145,7 +145,18 @@ async fn final_block_height(opts: &Opts) -> u64 {
 //     last_processed_block_height varint
 // )
 pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::Result<()> {
-    let scylladb_session = get_scylladb_session(scylla_url, scylla_keyspace).await?;
+    let scylladb_session = SessionBuilder::new().known_node(scylla_url).build().await?;
+    let mut str_query = format!("CREATE KEYSPACE IF NOT EXISTS {scylla_keyspace} ");
+    str_query.push_str("WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};");
+
+    scylladb_session
+        .query(
+            str_query,
+            &[],
+        )
+        .await?;
+
+    scylladb_session.use_keyspace(scylla_keyspace, false).await?;
 
     scylladb_session
         .query(
@@ -184,6 +195,19 @@ pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::
             CREATE TABLE IF NOT EXISTS meta (
                 indexer_id varchar PRIMARY KEY,
                 last_processed_block_height varint
+            )
+        ",
+            &[],
+        )
+        .await?;
+
+    scylladb_session
+        .query(
+            "
+            CREATE TABLE IF NOT EXISTS account_state (
+                account_id varchar,
+                data_key BLOB,
+                PRIMARY KEY (account_id, data_key),
             )
         ",
             &[],

@@ -89,8 +89,19 @@ async fn handle_state_change(
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
                         "Data".to_string(),
-                        Some(key.to_vec()),
-                        Some(value.to_vec()),
+                        key.to_vec(),
+                        value.to_vec(),
+                    ),
+                )
+                .await?;
+            scylladb_session
+                .query(
+                    "INSERT INTO account_state
+                    (account_id, data_key)
+                    VALUES(?, ?)",
+                    (
+                        account_id.to_string(),
+                        key.to_vec(),
                     ),
                 )
                 .await?;
