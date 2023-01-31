@@ -99,7 +99,6 @@ async fn handle_state_change(
                     (account_id, data_key)
                     VALUES(?, ?)",
                     (
-                        account_id.to_string(),
                         hex::encode(key).to_string(),
                     ),
                 )
