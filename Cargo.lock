@@ -2464,6 +2464,7 @@ dependencies = [
  "clap",
  "dotenv",
  "futures",
+ "hex",
  "http",
  "humantime",
  "itertools",
