@@ -161,14 +161,59 @@ pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::
     scylladb_session
         .query(
             "
-            CREATE TABLE IF NOT EXISTS state_changes (
+            CREATE TABLE IF NOT EXISTS state_changes_data (
                 account_id varchar,
                 block_height varint,
                 block_hash varchar,
-                change_scope varchar,
-                data_key BLOB,
+                data_key varchar,
                 data_value BLOB,
-                PRIMARY KEY ((account_id, change_scope), block_height)
+                PRIMARY KEY ((account_id, data_key), block_height)
+            ) WITH CLUSTERING ORDER BY (block_height DESC)
+        ",
+            &[],
+        )
+        .await?;
+
+    scylladb_session
+        .query(
+            "
+            CREATE TABLE IF NOT EXISTS state_changes_access_key (
+                account_id varchar,
+                block_height varint,
+                block_hash varchar,
+                data_key varchar,
+                data_value BLOB,
+                PRIMARY KEY ((account_id, data_key), block_height)
+            ) WITH CLUSTERING ORDER BY (block_height DESC)
+        ",
+            &[],
+        )
+        .await?;
+
+    scylladb_session
+        .query(
+            "
+            CREATE TABLE IF NOT EXISTS state_changes_contract (
+                account_id varchar,
+                block_height varint,
+                block_hash varchar,
+                data_value BLOB,
+                PRIMARY KEY (account_id, block_height)
+            ) WITH CLUSTERING ORDER BY (block_height DESC)
+        ",
+            &[],
+        )
+        .await?;
+
+    scylladb_session
+        .query(
+            "
+            CREATE TABLE IF NOT EXISTS state_changes_account (
+                account_id varchar,
+                block_height varint,
+                block_hash varchar,
+                data_value BLOB,
+                PRIMARY KEY (account_id, block_height)
             ) WITH CLUSTERING ORDER BY (block_height DESC)
         ",
             &[],
@@ -206,7 +251,7 @@ pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::
             "
             CREATE TABLE IF NOT EXISTS account_state (
                 account_id varchar,
-                data_key BLOB,
+                data_key varchar,
                 PRIMARY KEY (account_id, data_key),
             )
         ",

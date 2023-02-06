@@ -81,15 +81,14 @@ async fn handle_state_change(
             let value: &[u8] = value.as_ref();
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO state_changes_data
+                    (account_id, block_height, block_hash, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Data".to_string(),
-                        key.to_vec(),
+                        hex::encode(key).to_string(),
                         value.to_vec(),
                     ),
                 )
@@ -101,7 +100,7 @@ async fn handle_state_change(
                     VALUES(?, ?)",
                     (
                         account_id.to_string(),
-                        key.to_vec(),
+                        hex::encode(key).to_string(),
                     ),
                 )
                 .await?;
@@ -111,15 +110,14 @@ async fn handle_state_change(
             let key: &[u8] = key.as_ref();
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO state_changes_data
+                    (account_id, block_height, block_hash, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Data".to_string(),
-                        Some(key.to_vec()),
+                        hex::encode(key).to_string(),
                     ),
                 )
                 .await?;
@@ -138,16 +136,15 @@ async fn handle_state_change(
                 .expect("Failed to borsh-serialize the AccessKey");
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO state_changes_access_key
+                    (account_id, block_height, block_hash, data_key, data_value)
+                    VALUES(?, ?, ?, ?, ?)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "AccessKey".to_string(),
-                        Some(data_key),
-                        Some(data_value),
+                        hex::encode(&data_key).to_string(),
+                        data_value,
                     ),
                 )
                 .await?;
@@ -159,15 +156,14 @@ async fn handle_state_change(
                 .expect("Failed to borsh-serialize the PublicKey");
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO state_changes_access_key
+                    (account_id, block_height, block_hash, data_key, data_value)
+                    VALUES(?, ?, ?, ?, NULL)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "AccessKey".to_string(),
-                        Some(data_key),
+                        data_key,
                     ),
                 )
                 .await?;
@@ -177,15 +173,14 @@ async fn handle_state_change(
             let code: &[u8] = code.as_ref();
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, NULL, ?)",
+                    "INSERT INTO state_changes_contract
+                    (account_id, block_height, block_hash, data_value)
+                    VALUES(?, ?, ?, ?)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Contract".to_string(),
-                        Some(code.to_vec()),
+                        code.to_vec(),
                     ),
                 )
                 .await?;
@@ -194,14 +189,13 @@ async fn handle_state_change(
         StateChangeValueView::ContractCodeDeletion { account_id } => {
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, NULL, NULL)",
+                    "INSERT INTO state_changes_contract
+                    (account_id, block_height, block_hash, data_value)
+                    VALUES(?, ?, ?, NULL)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Contract".to_string(),
                     ),
                 )
                 .await?;
@@ -213,15 +207,14 @@ async fn handle_state_change(
                 .expect("Failed to borsh-serialize the Account");
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, NULL, ?)",
+                    "INSERT INTO state_changes_account
+                    (account_id, block_height, block_hash, data_value)
+                    VALUES(?, ?, ?, ?)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Account".to_string(),
-                        Some(value),
+                        value,
                     ),
                 )
                 .await?;
@@ -230,14 +223,13 @@ async fn handle_state_change(
         StateChangeValueView::AccountDeletion { account_id } => {
             scylladb_session
                 .query(
-                    "INSERT INTO state_changes
-                    (account_id, block_height, block_hash, change_scope, data_key, data_value)
-                    VALUES(?, ?, ?, ?, NULL, NULL)",
+                    "INSERT INTO state_changes_account
+                    (account_id, block_height, block_hash, data_value)
+                    VALUES(?, ?, ?, NULL)",
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        "Account".to_string(),
                     ),
                 )
                 .await?;
