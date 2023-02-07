@@ -98,10 +98,7 @@ async fn handle_state_change(
                     "INSERT INTO account_state
                     (account_id, data_key)
                     VALUES(?, ?)",
-                    (
-                        account_id.to_string(),
-                        hex::encode(key).to_string(),
-                    ),
+                    (account_id.to_string(), hex::encode(key).to_string()),
                 )
                 .await?;
             tracing::debug!(target: INDEXER, "DataUpdate {}", account_id,);
@@ -274,7 +271,13 @@ async fn main() -> anyhow::Result<()> {
     let (sender, stream) = near_lake_framework::streamer(config);
 
     // let redis_connection = get_redis_connection().await?;
-    let scylladb_session = configs::get_scylladb_session(&opts.scylla_url, &opts.scylla_keyspace).await?;
+    let scylladb_session = configs::get_scylladb_session(
+        &opts.scylla_url,
+        &opts.scylla_keyspace,
+        opts.scylla_user.as_deref(),
+        opts.scylla_password.as_deref(),
+    )
+    .await?;
 
     let mut handlers = tokio_stream::wrappers::ReceiverStream::new(stream)
         .map(|streamer_message| handle_streamer_message(streamer_message, &scylladb_session, &opts.indexer_id))

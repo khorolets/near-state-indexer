@@ -27,6 +27,12 @@ pub(crate) struct Opts {
     /// ScyllaDB keyspace
     #[clap(long, default_value = "state_indexer", env)]
     pub scylla_keyspace: String,
+    /// ScyllaDB user(login)
+    #[clap(long, env)]
+    pub scylla_user: Option<String>,
+    /// ScyllaDB password
+    #[clap(long, env)]
+    pub scylla_password: Option<String>,
     /// Chain ID: testnet or mainnet
     #[clap(subcommand)]
     pub chain_id: ChainId,
@@ -66,7 +72,12 @@ impl Opts {
 
 impl Opts {
     pub async fn to_lake_config(&self) -> anyhow::Result<near_lake_framework::LakeConfig> {
-        migrate(&self.scylla_url, &self.scylla_keyspace).await?;
+        migrate(
+            &self.scylla_url,
+            &self.scylla_keyspace,
+            self.scylla_user.as_deref(),
+            self.scylla_password.as_deref(),
+        ).await?;
 
         let config_builder = near_lake_framework::LakeConfigBuilder::default();
 
@@ -87,7 +98,13 @@ async fn get_start_block_height(opts: &Opts) -> anyhow::Result<u64> {
     match opts.start_options() {
         StartOptions::FromBlock { height } => Ok(*height),
         StartOptions::FromInterruption => {
-            let scylladb_session = get_scylladb_session(&opts.scylla_url, &opts.scylla_keyspace).await?;
+            let scylladb_session = get_scylladb_session(
+                &opts.scylla_url,
+                &opts.scylla_keyspace,
+                opts.scylla_user.as_deref(),
+                opts.scylla_password.as_deref(),
+            )
+            .await?;
 
             let row = scylladb_session
                 .query("SELECT last_processed_block_height FROM meta WHERE indexer_id = ?", (&opts.indexer_id,))
@@ -95,10 +112,8 @@ async fn get_start_block_height(opts: &Opts) -> anyhow::Result<u64> {
                 .single_row();
 
             if let Ok(row) = row {
-                let (block_height,) : (num_bigint::BigInt,) = row.into_typed::<(num_bigint::BigInt,)>()?;
-                Ok(block_height
-                    .to_u64()
-                    .expect("Failed to convert BigInt to u64"))
+                let (block_height,): (num_bigint::BigInt,) = row.into_typed::<(num_bigint::BigInt,)>()?;
+                Ok(block_height.to_u64().expect("Failed to convert BigInt to u64"))
             } else {
                 Ok(final_block_height(opts).await)
             }
@@ -144,17 +159,25 @@ async fn final_block_height(opts: &Opts) -> u64 {
 //     indexer_id varchar PRIMARY KEY,
 //     last_processed_block_height varint
 // )
-pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::Result<()> {
-    let scylladb_session = SessionBuilder::new().known_node(scylla_url).build().await?;
+pub(crate) async fn migrate(
+    scylla_url: &str,
+    scylla_keyspace: &str,
+    scylla_user: Option<&str>,
+    scylla_password: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut scylladb_session_builder = SessionBuilder::new().known_node(scylla_url);
+    if let Some(user) = scylla_user {
+        if let Some(password) = scylla_password {
+            scylladb_session_builder = scylladb_session_builder
+                .user(user, password);
+        }
+    }
+    let scylladb_session = scylladb_session_builder.build().await?;
+
     let mut str_query = format!("CREATE KEYSPACE IF NOT EXISTS {scylla_keyspace} ");
     str_query.push_str("WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1};");
 
-    scylladb_session
-        .query(
-            str_query,
-            &[],
-        )
-        .await?;
+    scylladb_session.query(str_query, &[]).await?;
 
     scylladb_session.use_keyspace(scylla_keyspace, false).await?;
 
@@ -262,12 +285,23 @@ pub(crate) async fn migrate(scylla_url: &str, scylla_keyspace: &str) -> anyhow::
     Ok(())
 }
 
-pub(crate) async fn get_scylladb_session(scylla_url: &str, scylla_keyspace: &str) -> anyhow::Result<Session> {
+pub(crate) async fn get_scylladb_session(
+    scylla_url: &str,
+    scylla_keyspace: &str,
+    scylla_user: Option<&str>,
+    scylla_password: Option<&str>,
+) -> anyhow::Result<Session> {
     tracing::debug!(target: crate::INDEXER, "Connecting to ScyllaDB");
-    let session: Session = SessionBuilder::new()
-        .known_node(scylla_url)
-        .use_keyspace(scylla_keyspace, false)
-        .build()
-        .await?;
-    Ok(session)
+    let mut session: SessionBuilder = SessionBuilder::new().known_node(scylla_url);
+
+    if let Some(user) = scylla_user {
+        tracing::debug!(target: crate::INDEXER, "Got ScyllaDB credentials, authenticating...");
+        if let Some(password) = scylla_password {
+            session = session.user(user, password);
+        }
+    }
+
+    session = session.use_keyspace(scylla_keyspace, false);
+
+    Ok(session.build().await?)
 }
