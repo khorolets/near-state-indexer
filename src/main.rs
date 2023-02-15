@@ -26,7 +26,7 @@ async fn handle_streamer_message(
     let block_hash = streamer_message.block.header.hash;
     tracing::info!(target: INDEXER, "Block height {}", block_height,);
 
-    let _ = handle_block(&streamer_message.block, scylladb_session).await;
+    handle_block(&streamer_message.block, scylladb_session).await?;
 
     let futures = streamer_message.shards.into_iter().flat_map(|shard| {
         shard.state_changes.into_iter().map(|state_change_with_cause| {
