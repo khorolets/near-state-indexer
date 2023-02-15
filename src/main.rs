@@ -34,15 +34,24 @@ async fn handle_streamer_message(
         })
     });
 
-    futures::future::join_all(futures).await;
+    futures::future::try_join_all(futures).await?;
 
+    tracing::debug!(
+        target: INDEXER,
+        "INSERT INTO meta
+        (indexer_id, last_processed_block_height)
+        VALUES ({}, {})",
+        indexer_id,
+        block_height,
+    );
+    let mut query = scylla::statement::query::Query::new(
+        "INSERT INTO meta
+        (indexer_id, last_processed_block_height)
+        VALUES (?, ?)",
+    );
+    query.set_consistency(scylla::frame::types::Consistency::All);
     scylladb_session
-        .query(
-            "INSERT INTO meta
-            (indexer_id, last_processed_block_height)
-            VALUES (?, ?)",
-            (indexer_id, bigdecimal::BigDecimal::from_u64(block_height).unwrap()),
-        )
+        .query(query, (indexer_id, bigdecimal::BigDecimal::from_u64(block_height).unwrap()))
         .await?;
     Ok(())
 }
@@ -51,11 +60,28 @@ async fn handle_block(
     block: &near_indexer_primitives::views::BlockView,
     scylladb_session: &Session,
 ) -> anyhow::Result<QueryResult> {
+    tracing::debug!(
+        target: INDEXER,
+        "INSERT INTO blocks
+        (block_height, block_hash, chunks)
+        VALUES ({}, {}, {:?})",
+        block.header.height,
+        block.header.hash.to_string(),
+        block
+            .chunks
+            .iter()
+            .map(|chunk_header_view| chunk_header_view.chunk_hash.to_string())
+            .collect::<Vec<String>>(),
+    );
+    let mut query = scylla::statement::query::Query::new(
+        "INSERT INTO blocks
+        (block_height, block_hash, chunks)
+        VALUES (?, ?, ?)",
+    );
+    query.set_consistency(scylla::frame::types::Consistency::All);
     Ok(scylladb_session
         .query(
-            "INSERT INTO blocks
-            (block_height, block_hash, chunks)
-            VALUES (?, ?, ?)",
+            query,
             (
                 bigdecimal::BigDecimal::from_u64(block.header.height).unwrap(),
                 block.header.hash.to_string(),
@@ -79,11 +105,26 @@ async fn handle_state_change(
         StateChangeValueView::DataUpdate { account_id, key, value } => {
             let key: &[u8] = key.as_ref();
             let value: &[u8] = value.as_ref();
-            scylladb_session
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_data
+                (account_id, block_height, block_hash, data_key, data_value)
+                VALUES({}, {}, {}, {}, {:?})",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                hex::encode(key),
+                value.to_vec(),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_data
+                (account_id, block_height, block_hash, data_key, data_value)
+                VALUES(?, ?, ?, ?, ?)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
                 .query(
-                    "INSERT INTO state_changes_data
-                    (account_id, block_height, block_hash, data_key, data_value)
-                    VALUES(?, ?, ?, ?, ?)",
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
@@ -92,24 +133,52 @@ async fn handle_state_change(
                         value.to_vec(),
                     ),
                 )
-                .await?;
-            scylladb_session
-                .query(
-                    "INSERT INTO account_state
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("DATAUPDATE ERROR {:?} | {}", err, hex::encode(key)),
+            };
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO account_state (account_id, data_key) VALUES({}, {})",
+                account_id.to_string(),
+                hex::encode(key),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO account_state
                     (account_id, data_key)
                     VALUES(?, ?)",
-                    (account_id.to_string(), hex::encode(key).to_string()),
-                )
-                .await?;
-            tracing::debug!(target: INDEXER, "DataUpdate {}", account_id,);
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(query, (account_id.to_string(), hex::encode(key).to_string()))
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("STATE ERROR {:?} | {}", err, hex::encode(key)),
+            };
         }
         StateChangeValueView::DataDeletion { account_id, key } => {
             let key: &[u8] = key.as_ref();
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_data
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_data
+                (account_id, block_height, block_hash, data_key, data_value)
+                VALUES({}, {}, {}, {}, NULL)",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                hex::encode(key),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_data
                     (account_id, block_height, block_hash, data_key, data_value)
                     VALUES(?, ?, ?, ?, NULL)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
@@ -117,8 +186,11 @@ async fn handle_state_change(
                         hex::encode(key).to_string(),
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "DataUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("DATADELETE ERROR {:?} | {}", err, hex::encode(key)),
+            };
         }
         StateChangeValueView::AccessKeyUpdate {
             account_id,
@@ -131,11 +203,26 @@ async fn handle_state_change(
             let data_value = access_key
                 .try_to_vec()
                 .expect("Failed to borsh-serialize the AccessKey");
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_access_key
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_access_key
+                (account_id, block_height, block_hash, data_key, data_value)
+                VALUES({}, {}, {}, {}, {:?})",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                hex::encode(&data_key),
+                data_value,
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_access_key
                     (account_id, block_height, block_hash, data_key, data_value)
                     VALUES(?, ?, ?, ?, ?)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
@@ -144,35 +231,69 @@ async fn handle_state_change(
                         data_value,
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "AccessKeyUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("ACCESSKEYUPDATE ERROR {:?} | {}", err, hex::encode(data_key)),
+            };
         }
         StateChangeValueView::AccessKeyDeletion { account_id, public_key } => {
             let data_key = public_key
                 .try_to_vec()
                 .expect("Failed to borsh-serialize the PublicKey");
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_access_key
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_access_key
+                (account_id, block_height, block_hash, data_key, data_value)
+                VALUES({}, {}, {}, {}, NULL)",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                hex::encode(&data_key),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_access_key
                     (account_id, block_height, block_hash, data_key, data_value)
                     VALUES(?, ?, ?, ?, NULL)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
-                        data_key,
+                        hex::encode(&data_key).to_string(),
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "AccessKeyUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("ACCESSKEYDELETION ERROR {:?} | {}", err, hex::encode(data_key)),
+            };
         }
         StateChangeValueView::ContractCodeUpdate { account_id, code } => {
             let code: &[u8] = code.as_ref();
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_contract
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_contract
+                (account_id, block_height, block_hash, data_value)
+                VALUES({}, {}, {}, {:?})",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                code.to_vec(),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_contract
                     (account_id, block_height, block_hash, data_value)
                     VALUES(?, ?, ?, ?)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
@@ -180,33 +301,66 @@ async fn handle_state_change(
                         code.to_vec(),
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "ContractCodeUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("CONTRACTCODEUPDATE ERROR {:?}", err),
+            };
         }
         StateChangeValueView::ContractCodeDeletion { account_id } => {
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_contract
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_contract
+                (account_id, block_height, block_hash, data_value)
+                VALUES({}, {}, {}, NULL)",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_contract
                     (account_id, block_height, block_hash, data_value)
                     VALUES(?, ?, ?, NULL)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "ContractCodeUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("CONTRACTCODEDELETION ERROR {:?}", err),
+            };
         }
         StateChangeValueView::AccountUpdate { account_id, account } => {
             let value = Account::from(account)
                 .try_to_vec()
                 .expect("Failed to borsh-serialize the Account");
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_account
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_account
+                (account_id, block_height, block_hash, data_value)
+                VALUES({}, {}, {}, {:?})",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+                &value,
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_account
                     (account_id, block_height, block_hash, data_value)
                     VALUES(?, ?, ?, ?)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
@@ -214,23 +368,42 @@ async fn handle_state_change(
                         value,
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "AccountUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("ACCOUNTUPDATE ERROR {:?}", err),
+            };
         }
         StateChangeValueView::AccountDeletion { account_id } => {
-            scylladb_session
-                .query(
-                    "INSERT INTO state_changes_account
+            tracing::debug!(
+                target: INDEXER,
+                "INSERT INTO state_changes_account
+                (account_id, block_height, block_hash, data_value)
+                VALUES({}, {}, {}, NULL)",
+                account_id.to_string(),
+                block_height,
+                block_hash.to_string(),
+            );
+            let mut query = scylla::statement::query::Query::new(
+                "INSERT INTO state_changes_account
                     (account_id, block_height, block_hash, data_value)
                     VALUES(?, ?, ?, NULL)",
+            );
+            query.set_consistency(scylla::frame::types::Consistency::All);
+            match scylladb_session
+                .query(
+                    query,
                     (
                         account_id.to_string(),
                         bigdecimal::BigDecimal::from_u64(block_height).unwrap(),
                         block_hash.to_string(),
                     ),
                 )
-                .await?;
-            tracing::debug!(target: INDEXER, "AccountUpdate {}", account_id,);
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => anyhow::bail!("ACCOUNTDELETION ERROR {:?}", err),
+            };
         }
     }
     Ok(())
@@ -283,7 +456,11 @@ async fn main() -> anyhow::Result<()> {
         .map(|streamer_message| handle_streamer_message(streamer_message, &scylladb_session, &opts.indexer_id))
         .buffer_unordered(1usize);
 
-    while let Some(_handle_message) = handlers.next().await {}
+    while let Some(_handle_message) = handlers.next().await {
+        if let Err(err) = _handle_message {
+            tracing::warn!(target: INDEXER, "{:?}", err);
+        }
+    }
     drop(handlers); // close the channel so the sender will stop
 
     // propagate errors from the sender

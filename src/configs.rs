@@ -72,12 +72,8 @@ impl Opts {
 
 impl Opts {
     pub async fn to_lake_config(&self) -> anyhow::Result<near_lake_framework::LakeConfig> {
-        migrate(
-            &self.scylla_url,
-            &self.scylla_keyspace,
-            self.scylla_user.as_deref(),
-            self.scylla_password.as_deref(),
-        ).await?;
+        migrate(&self.scylla_url, &self.scylla_keyspace, self.scylla_user.as_deref(), self.scylla_password.as_deref())
+            .await?;
 
         let config_builder = near_lake_framework::LakeConfigBuilder::default();
 
@@ -168,8 +164,7 @@ pub(crate) async fn migrate(
     let mut scylladb_session_builder = SessionBuilder::new().known_node(scylla_url);
     if let Some(user) = scylla_user {
         if let Some(password) = scylla_password {
-            scylladb_session_builder = scylladb_session_builder
-                .user(user, password);
+            scylladb_session_builder = scylladb_session_builder.user(user, password);
         }
     }
     let scylladb_session = scylladb_session_builder.build().await?;
