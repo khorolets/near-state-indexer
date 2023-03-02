@@ -244,7 +244,7 @@ pub(crate) async fn migrate(
             CREATE TABLE IF NOT EXISTS blocks (
                 block_height varint,
                 block_hash varchar,
-                chunks set<varchar>,
+                chunks list<varchar>,
                 PRIMARY KEY (block_hash)
             )
         ",
